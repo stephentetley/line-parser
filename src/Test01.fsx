@@ -14,6 +14,18 @@ let temp01 () =
     lines.[0]
 
 let test01 () = 
-    let action = tupleM2 textline textline
-    runLineParserFile inputFile action
+    let parser = tupleM2 textline textline
+    runLineParserFile inputFile parser
 
+let test02 () = 
+    let parser = 
+        let bodyStart = rmatch1 "^Body:.*"
+        skipManyTill textline (lookahead bodyStart) >>>. textline
+    runLineParserFile inputFile parser
+
+/// Should fail...
+let test02a () = 
+    let parser = 
+        let bodyStart = rmatch1 "^Body:.*"
+        bodyStart
+    runLineParserFile inputFile parser

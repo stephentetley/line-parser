@@ -361,10 +361,19 @@ let textline : LineParser<string> =
         with
         | _ -> Err (parseError pos "textline failed - out of input")
 
+
+let skipline : LineParser<unit> = 
+    LineParser <| fun lines pos ->
+        if pos >= 0 && pos < lines.Length then
+            Ok (pos+1, ())
+        else
+            Err (parseError pos "skipline failed - out of input")
+
+
 let rmatch1 (pattern:string) : LineParser<string> = 
     let action : LineParser<string> = 
         textline >>>= fun input -> 
-        match Regex.Matches(input, ".*") |> Seq.cast<Match> |> Seq.toList with
+        match Regex.Matches(input, pattern) |> Seq.cast<Match> |> Seq.toList with
         | (m1::_) -> lpreturn m1.Value
         | _ -> throwError "rmatch - no match"
     action <&?> "rmatch"
@@ -401,3 +410,120 @@ let between (popen:LineParser<_>) (pclose:LineParser<_>)
         let! _ = pclose
         return ans 
     }
+
+
+let many (ma:LineParser<'a>) : LineParser<'a list> = 
+    LineParser <| fun lines pos0 ->
+        let rec work pos ac = 
+            match apply1 ma lines pos with
+            | Err _ -> Ok (pos, List.rev ac)
+            | Ok (pos1,a) -> work pos1 (a::ac)
+        work pos0 []
+
+
+let many1 (ma:LineParser<'a>) : LineParser<'a list> = 
+    parseLines { 
+        let! a1 = ma
+        let! rest = many ma
+        return (a1::rest) 
+    } 
+
+let skipMany (ma:LineParser<'a>) : LineParser<unit> = 
+    LineParser <| fun lines pos0 ->
+        let rec work pos = 
+            match apply1 ma lines pos with
+            | Err _ -> Ok (pos, ())
+            | Ok (pos1,a) -> work pos1
+        work pos0
+
+let skipMany1 (ma:LineParser<'a>) : LineParser<unit> = 
+    parseLines { 
+        let! _ = ma
+        let! _ = skipMany ma
+        return () 
+    } 
+
+
+
+
+let sepBy1 (ma:LineParser<'a>) 
+            (sep:LineParser<_>) : LineParser<'a list> = 
+    parseLines { 
+        let! a1 = ma
+        let! rest = many (sep >>>. ma) 
+        return (a1::rest)
+    }
+
+let sepBy (ma:LineParser<'a>) 
+            (sep:LineParser<_>) : LineParser<'a list> = 
+    sepBy1 ma sep <||> lpreturn []
+
+
+let skipSepBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
+    parseLines { 
+        let! _ = ma
+        let! _ = skipMany (sep >>>. ma) 
+        return ()
+    }
+
+let skipSepBy (ma:LineParser<'a>) 
+            (sep:LineParser<_>) : LineParser<unit> = 
+    skipSepBy1 ma sep <||> lpreturn ()
+
+
+
+let sepEndBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<'a list> = 
+    parseLines { 
+        let! a1 = ma
+        let! rest = many (sep >>>. ma) 
+        let! _ = optionalz sep
+        return (a1::rest)
+    }
+
+let sepEndBy (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<'a list> = 
+    sepEndBy1 ma sep <||> lpreturn []
+
+
+let skipSepEndBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
+    parseLines { 
+        let! _ = ma
+        let! _ = skipMany (sep >>>. ma) 
+        let! _ = optionalz sep
+        return ()
+    }
+
+let skipSepEndBy (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
+    skipSepEndBy1 ma sep <||> lpreturn ()
+
+
+
+let manyTill (ma:LineParser<'a>) 
+                (terminator:LineParser<_>) : LineParser<'a list> = 
+    LineParser <| fun lines pos0 ->
+        let rec work pos ac = 
+            match apply1 terminator lines pos with
+            | Err msg -> 
+                match apply1 ma lines pos with
+                | Err msg -> Err msg
+                | Ok (pos1,a) -> work pos1 (a::ac) 
+            | Ok (pos1,_) -> Ok(pos1, List.rev ac)
+        work pos0 []
+
+let many1Till (ma:LineParser<'a>) 
+                (terminator:LineParser<_>) : LineParser<'a list> = 
+    liftM2 (fun a xs -> a::xs) ma (manyTill ma terminator)
+
+
+let skipManyTill (ma:LineParser<'a>) (terminator:LineParser<_>) : LineParser<unit> = 
+    LineParser <| fun lines pos0 ->
+        let rec work pos = 
+            match apply1 terminator lines pos with
+            | Err _ -> 
+                match apply1 ma lines pos with
+                | Err stk -> Err stk
+                | Ok (pos1,a) -> work pos1 
+            | Ok (pos1,_) -> Ok(pos1, ())
+        work pos0
+
+let skipMany1Till (ma:LineParser<'a>) (terminator:LineParser<_>) : LineParser<unit> = 
+    ma >>>. (skipManyTill ma terminator)    
