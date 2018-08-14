@@ -7,9 +7,19 @@ module LineParser.Parser
 open System.Text
 open System.Text.RegularExpressions
 
+open FParsec
+
+
 /// We expect to delegate to FParsec or Regex for character level parsers
 /// numbers, strings, dates, times, etc.
 /// Naming should avoid needless clashes with FParsec
+
+// TODO 
+// Having Perm parsers and "Bounded Seas" would be very convenient.
+
+
+type ParsecParser<'ans> = Parser<'ans,unit>
+
 
 type LineNumber = int
 type Index = int
@@ -371,12 +381,36 @@ let skipline : LineParser<unit> =
 
 
 let rmatch1 (pattern:string) : LineParser<string> = 
-    let action : LineParser<string> = 
+    let action = 
         textline >>>= fun input -> 
         match Regex.Matches(input, pattern) |> Seq.cast<Match> |> Seq.toList with
         | (m1::_) -> lpreturn m1.Value
-        | _ -> throwError "rmatch - no match"
-    action <&?> "rmatch"
+        | _ -> throwError "rmatch1 - no match"
+    action <&?> "rmatch1"
+
+let rgroups (pattern:string) : LineParser<GroupCollection>= 
+    let parse1 = 
+        textline >>>= fun input -> 
+        let m1 = Regex.Match(input, pattern) 
+        if m1.Success then
+            lpreturn m1.Groups
+        else
+            throwError "groups - no match"
+    parse1 <&?> "rgroups"
+
+
+
+
+// *************************************
+// String level parsing with FParsec
+
+/// Run an FParsec parser on the current line.
+let fparsec (parser:ParsecParser<'a>) : LineParser<'a> = 
+    textline >>>= fun text -> 
+        let name = "none" 
+        match runParserOnString parser () name text with
+        | Success(ans,_,_) -> lpreturn ans
+        | Failure(msg,_,_) -> throwError msg
 
 
 // *************************************
