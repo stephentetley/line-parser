@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="Test01.fsx" />
+    <None Include="Test02.fsx" />
+    <None Include="Perm1.fsx" />
+    <None Include="Perm2.fsx" />
+  </ItemGroup>
+
+</Project>

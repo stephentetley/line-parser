@@ -1,24 +1,17 @@
-﻿// Copyright (c) Stephen Tetley 2018
+﻿// Copyright (c) Stephen Tetley 2018,2019
 // License: BSD 3 Clause
 
 
 module LineParser.Parser
 
+
 open System.Text
 open System.Text.RegularExpressions
 
-open FParsec
-
-
-/// We expect to delegate to FParsec or Regex for character level parsers
-/// numbers, strings, dates, times, etc.
-/// Naming should avoid needless clashes with FParsec
 
 // TODO 
 // Having Perm parsers and "Bounded Seas" would be very convenient.
 
-
-type ParsecParser<'ans> = Parser<'ans,unit>
 
 
 type LineNumber = int
@@ -52,19 +45,17 @@ let concatParseErrors (lineNum:LineNumber) (errMsg:string)
     ParseError({ Line=lineNum+1; ErrMessage=errMsg },failures)
 
 
-type Result<'a> = 
-    | Err of ParseError
-    | Ok of LineNumber * 'a
+type Answer<'a> = Result<LineNumber * 'a, ParseError>
 
 type LineParser<'a> = 
-    LineParser of (string [] -> Index -> Result<'a>)
+    LineParser of (string [] -> Index -> Answer<'a>)
 
 let inline private apply1 (ma: LineParser<'a>) 
                             (lines: string [])
-                            (pos: LineNumber) : Result<'a>= 
+                            (pos: LineNumber) : Answer<'a>= 
     let (LineParser f) = ma in f lines pos
 
-let inline lpreturn (x:'a) : LineParser<'a> = 
+let inline mreturn (x:'a) : LineParser<'a> = 
     LineParser <| fun _ pos -> Ok (pos,x)
 
 
@@ -72,31 +63,31 @@ let inline private bindM (ma: LineParser<'a>)
                             (f: 'a -> LineParser<'b>) : LineParser<'b> =
     LineParser <| fun lines pos -> 
         match apply1 ma lines pos with
-        | Err stk -> Err stk
+        | Error stk -> Error stk
         | Ok (pos1,a) -> apply1 (f a) lines pos1
 
 
-let inline lpzero () : LineParser<'a> = 
-    LineParser <| fun _ pos -> Err (parseError pos "pzero")
+let inline private zeroM () : LineParser<'a> = 
+    LineParser <| fun _ pos -> Error (parseError pos "zero")
 
 
 let inline private combineM (ma:LineParser<unit>) 
-                                (mb:LineParser<unit>) : LineParser<unit> = 
+                                (mb:LineParser<'b>) : LineParser<'b> = 
     LineParser <| fun lines pos -> 
         match apply1 ma lines pos with
-        | Err stk -> Err stk
+        | Error stk -> Error stk
         | Ok (pos1,a) -> apply1 mb lines pos1
 
 
 let inline private  delayM (fn:unit -> LineParser<'a>) : LineParser<'a> = 
-    bindM (lpreturn ()) fn 
+    bindM (mreturn ()) fn 
 
 
 
 type LineParserBuilder () = 
-    member self.Return x            = lpreturn x
+    member self.Return x            = mreturn x
     member self.Bind (p,f)          = bindM p f
-    member self.Zero ()             = lpzero ()
+    member self.Zero ()             = zeroM ()
     member self.Combine (ma,mb)     = combineM ma mb
     member self.Delay fn            = delayM fn
 
@@ -106,7 +97,7 @@ type LineParserBuilder () =
 let (parseLines:LineParserBuilder) = new LineParserBuilder ()
 
 
-let (>>>=) (ma:LineParser<'a>) (fn:'a -> LineParser<'b>) : LineParser<'b> = 
+let (>>=) (ma:LineParser<'a>) (fn:'a -> LineParser<'b>) : LineParser<'b> = 
     bindM ma fn
 
 
@@ -114,12 +105,12 @@ let (>>>=) (ma:LineParser<'a>) (fn:'a -> LineParser<'b>) : LineParser<'b> =
 // Errors
 
 let throwError (msg:string) : LineParser<'a> = 
-    LineParser <| fun _ pos -> Err (parseError pos msg)
+    LineParser <| fun _ pos -> Error (parseError pos msg)
 
 let swapError (msg:string) (ma:LineParser<'a>) : LineParser<'a> = 
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err (ParseError (_,stk)) -> Err (concatParseErrors pos msg stk)
+        | Error (ParseError (_,stk)) -> Error (concatParseErrors pos msg stk)
         | Ok (pos1,a) -> Ok (pos1,a)
 
 let (<&?>) (ma:LineParser<'a>) (msg:string) : LineParser<'a> = 
@@ -132,18 +123,18 @@ let (<?&>) (msg:string) (ma:LineParser<'a>) : LineParser<'a> =
 let fmapM (fn:'a -> 'b) (ma:LineParser<'a>) : LineParser<'b> = 
     LineParser <| fun tables ix -> 
        match apply1 ma tables ix with
-       | Err msg -> Err msg
+       | Error msg -> Error msg
        | Ok (ix1,a) -> Ok (ix1, fn a)
 
 // This is the nub of embedding FParsec - name clashes.
 // We avoid them by using longer names in DocSoup.
 
 /// Operator for fmap.
-let (|>>>) (ma:LineParser<'a>) (fn:'a -> 'b) : LineParser<'b> = 
+let (|>>) (ma:LineParser<'a>) (fn:'a -> 'b) : LineParser<'b> = 
     fmapM fn ma
 
 /// Flipped fmap.
-let (<<<|) (fn:'a -> 'b) (ma:LineParser<'a>) : LineParser<'b> = 
+let (<<|) (fn:'a -> 'b) (ma:LineParser<'a>) : LineParser<'b> = 
     fmapM fn ma
 
 // liftM (which is fmap)
@@ -258,9 +249,9 @@ let pipeM6 (ma:LineParser<'a>) (mb:LineParser<'b>)
 let alt (ma:LineParser<'a>) (mb:LineParser<'a>) : LineParser<'a> = 
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err stk1 -> 
+        | Error stk1 -> 
             match apply1 mb lines pos with
-            | Err stk2 -> Err (concatParseErrors pos "alt" [stk1;stk2])
+            | Error stk2 -> Error (concatParseErrors pos "alt" [stk1;stk2])
             | Ok (pos1,b) -> Ok (pos1,b)
         | Ok (pos1,a) -> Ok (pos1,a)
 
@@ -299,10 +290,10 @@ let seqR (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> =
         return b
     }
 
-let (.>>>) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'a> = 
+let (.>>) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'a> = 
     seqL ma mb
 
-let (>>>.) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> = 
+let (>>.) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> = 
     seqR ma mb
 
 
@@ -313,7 +304,7 @@ let mapM (p: 'a -> LineParser<'b>) (source:'a list) : LineParser<'b list> =
             | [] -> Ok (pos, List.rev ac)
             | z :: zs -> 
                 match apply1 (p z) lines pos with
-                | Err stk -> Err stk
+                | Error stk -> Error stk
                 | Ok (pos1,ans) -> work pos1 (ans::ac) zs
         work pos0  [] source
 
@@ -324,8 +315,8 @@ let optionToFailure (ma:LineParser<option<'a>>)
                     (errMsg:string) : LineParser<'a> = 
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err stk -> Err stk
-        | Ok (_,None) -> Err (parseError pos errMsg)
+        | Error stk -> Error stk
+        | Ok (_,None) -> Error (parseError pos errMsg)
         | Ok (pos1, Some a) -> Ok (pos1,a)
 
 
@@ -336,24 +327,24 @@ let optionToFailure (ma:LineParser<option<'a>>)
 let optional (ma:LineParser<'a>) : LineParser<'a option> = 
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err _ -> Ok (pos,None)
+        | Error _ -> Ok (pos,None)
         | Ok (pos1,a) -> Ok (pos1,Some a)
 
 let optionalz (ma:LineParser<'a>) : LineParser<unit> = 
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err _ -> Ok (pos, ())
+        | Error _ -> Ok (pos, ())
         | Ok (pos1,_) -> Ok (pos1, ())
 
 // *************************************
 // Run functions
 
 /// TODO - want a safer string split...
-let runLineParser (input:string) (ma:LineParser<'a>) : Result<'a>= 
+let runLineParser (input:string) (ma:LineParser<'a>) : Answer<'a>= 
     match ma with 
     | LineParser fn ->  fn (input.Split('\n')) 0
 
-let runLineParserFile (inputPath:string) (ma:LineParser<'a>) : Result<'a>= 
+let runLineParserFile (inputPath:string) (ma:LineParser<'a>) : Answer<'a>= 
     let input : string [] = System.IO.File.ReadAllLines(inputPath)
     match ma with 
     | LineParser fn ->  fn input 0
@@ -369,7 +360,7 @@ let textline : LineParser<string> =
             let s = lines.[pos]
             Ok (pos+1, s)
         with
-        | _ -> Err (parseError pos "textline failed - out of input")
+        | _ -> Error (parseError pos "textline failed - out of input")
 
 
 let skipline : LineParser<unit> = 
@@ -377,40 +368,27 @@ let skipline : LineParser<unit> =
         if pos >= 0 && pos < lines.Length then
             Ok (pos+1, ())
         else
-            Err (parseError pos "skipline failed - out of input")
+            Error (parseError pos "skipline failed - out of input")
 
 
 let rmatch1 (pattern:string) : LineParser<string> = 
     let action = 
-        textline >>>= fun input -> 
+        textline >>= fun input -> 
         match Regex.Matches(input, pattern) |> Seq.cast<Match> |> Seq.toList with
-        | (m1::_) -> lpreturn m1.Value
+        | (m1::_) -> mreturn m1.Value
         | _ -> throwError "rmatch1 - no match"
     action <&?> "rmatch1"
 
 let rgroups (pattern:string) : LineParser<GroupCollection>= 
     let parse1 = 
-        textline >>>= fun input -> 
+        textline >>= fun input -> 
         let m1 = Regex.Match(input, pattern) 
         if m1.Success then
-            lpreturn m1.Groups
+            mreturn m1.Groups
         else
             throwError "groups - no match"
     parse1 <&?> "rgroups"
 
-
-
-
-// *************************************
-// String level parsing with FParsec
-
-/// Run an FParsec parser on the current line.
-let fparsec (parser:ParsecParser<'a>) : LineParser<'a> = 
-    textline >>>= fun text -> 
-        let name = "none" 
-        match runParserOnString parser () name text with
-        | Success(ans,_,_) -> lpreturn ans
-        | Failure(msg,_,_) -> throwError msg
 
 
 // *************************************
@@ -426,13 +404,13 @@ let eof : LineParser<unit> =
         if pos >= lines.Length then 
             Ok (pos, ())
         else
-            Err (parseError pos "eof (not-at-end)")
+            Error (parseError pos "eof (not-at-end)")
 
 /// Parses p without consuming input
 let lookahead (ma:LineParser<'a>) : LineParser<'a> =
     LineParser <| fun lines pos ->
         match apply1 ma lines pos with
-        | Err msg -> Err msg
+        | Error msg -> Error msg
         | Ok (_,a) -> Ok (pos,a)
 
 
@@ -450,7 +428,7 @@ let many (ma:LineParser<'a>) : LineParser<'a list> =
     LineParser <| fun lines pos0 ->
         let rec work pos ac = 
             match apply1 ma lines pos with
-            | Err _ -> Ok (pos, List.rev ac)
+            | Error _ -> Ok (pos, List.rev ac)
             | Ok (pos1,a) -> work pos1 (a::ac)
         work pos0 []
 
@@ -466,7 +444,7 @@ let skipMany (ma:LineParser<'a>) : LineParser<unit> =
     LineParser <| fun lines pos0 ->
         let rec work pos = 
             match apply1 ma lines pos with
-            | Err _ -> Ok (pos, ())
+            | Error _ -> Ok (pos, ())
             | Ok (pos1,a) -> work pos1
         work pos0
 
@@ -484,50 +462,50 @@ let sepBy1 (ma:LineParser<'a>)
             (sep:LineParser<_>) : LineParser<'a list> = 
     parseLines { 
         let! a1 = ma
-        let! rest = many (sep >>>. ma) 
+        let! rest = many (sep >>. ma) 
         return (a1::rest)
     }
 
 let sepBy (ma:LineParser<'a>) 
             (sep:LineParser<_>) : LineParser<'a list> = 
-    sepBy1 ma sep <||> lpreturn []
+    sepBy1 ma sep <||> mreturn []
 
 
 let skipSepBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
     parseLines { 
         let! _ = ma
-        let! _ = skipMany (sep >>>. ma) 
+        let! _ = skipMany (sep >>. ma) 
         return ()
     }
 
 let skipSepBy (ma:LineParser<'a>) 
             (sep:LineParser<_>) : LineParser<unit> = 
-    skipSepBy1 ma sep <||> lpreturn ()
+    skipSepBy1 ma sep <||> mreturn ()
 
 
 
 let sepEndBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<'a list> = 
     parseLines { 
         let! a1 = ma
-        let! rest = many (sep >>>. ma) 
+        let! rest = many (sep >>. ma) 
         let! _ = optionalz sep
         return (a1::rest)
     }
 
 let sepEndBy (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<'a list> = 
-    sepEndBy1 ma sep <||> lpreturn []
+    sepEndBy1 ma sep <||> mreturn []
 
 
 let skipSepEndBy1 (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
     parseLines { 
         let! _ = ma
-        let! _ = skipMany (sep >>>. ma) 
+        let! _ = skipMany (sep >>. ma) 
         let! _ = optionalz sep
         return ()
     }
 
 let skipSepEndBy (ma:LineParser<'a>) (sep:LineParser<_>) : LineParser<unit> = 
-    skipSepEndBy1 ma sep <||> lpreturn ()
+    skipSepEndBy1 ma sep <||> mreturn ()
 
 
 
@@ -536,9 +514,9 @@ let manyTill (ma:LineParser<'a>)
     LineParser <| fun lines pos0 ->
         let rec work pos ac = 
             match apply1 terminator lines pos with
-            | Err msg -> 
+            | Error msg -> 
                 match apply1 ma lines pos with
-                | Err msg -> Err msg
+                | Error msg -> Error msg
                 | Ok (pos1,a) -> work pos1 (a::ac) 
             | Ok (pos1,_) -> Ok(pos1, List.rev ac)
         work pos0 []
@@ -552,12 +530,12 @@ let skipManyTill (ma:LineParser<'a>) (terminator:LineParser<_>) : LineParser<uni
     LineParser <| fun lines pos0 ->
         let rec work pos = 
             match apply1 terminator lines pos with
-            | Err _ -> 
+            | Error _ -> 
                 match apply1 ma lines pos with
-                | Err stk -> Err stk
+                | Error stk -> Error stk
                 | Ok (pos1,a) -> work pos1 
             | Ok (pos1,_) -> Ok(pos1, ())
         work pos0
 
 let skipMany1Till (ma:LineParser<'a>) (terminator:LineParser<_>) : LineParser<unit> = 
-    ma >>>. (skipManyTill ma terminator)    
+    ma >>. (skipManyTill ma terminator)    
