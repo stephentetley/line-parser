@@ -7,8 +7,11 @@
   <ItemGroup>
     <Compile Include="FParsecLines.fs" />
     <None Include="Test01.fsx" />
+    <None Include="Test02.fsx" />
   </ItemGroup>
 
-  <ItemGroup />
+  <ItemGroup>
+    <PackageReference Include="FParsec" Version="1.0.4-RC3" />
+  </ItemGroup>
 
 </Project>
