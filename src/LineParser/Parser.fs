@@ -7,6 +7,7 @@ module Parser =
 
 
     open System
+    open System.Text
     open System.Text.RegularExpressions
 
 
@@ -14,46 +15,46 @@ module Parser =
     // Having Perm parsers and "Bounded Seas" would be very convenient.
 
 
-
+    type LineNumber = int
     type ErrMsg = string
 
 
-    type ParserState = 
-        { LineNumber: int 
-          Lines: string list }
+    type ParserState = LineNumber
 
 
     type Answer<'a> = Result<'a * ParserState, ErrMsg>
 
     type LineParser<'a> = 
-        LineParser of (ParserState -> Answer<'a>)
+        LineParser of (RegexOptions -> string [] -> ParserState -> Answer<'a>)
 
-    let inline private apply1 (ma: LineParser<'a>) 
-                                (st: ParserState) : Answer<'a>= 
-        let (LineParser f) = ma in f st
+    let inline private apply1 (ma : LineParser<'a>) 
+                              (opts : RegexOptions)
+                              (body : string [])
+                              (state : ParserState) : Answer<'a>= 
+        let (LineParser f) = ma in f opts body state
 
     let inline mreturn (x:'a) : LineParser<'a> = 
-        LineParser <| fun st  -> Ok (x, st)
+        LineParser <| fun _ _ st  -> Ok (x, st)
 
 
-    let inline private bindM (ma: LineParser<'a>) 
-                                (f: 'a -> LineParser<'b>) : LineParser<'b> =
-        LineParser <| fun st -> 
-            match apply1 ma st with
+    let inline private bindM (ma : LineParser<'a>) 
+                             (f : 'a -> LineParser<'b>) : LineParser<'b> =
+        LineParser <| fun opts body st -> 
+            match apply1 ma opts body st with
             | Error msg -> Error msg
-            | Ok (a, st1) -> apply1 (f a) st1
+            | Ok (a, st1) -> apply1 (f a) opts body st1
 
 
     let inline private zeroM () : LineParser<'a> = 
-        LineParser <| fun _ -> Error "zeroM"
+        LineParser <| fun _ _ _ -> Error "zeroM"
 
 
     let inline private combineM (ma:LineParser<'z>) 
                                     (mb:LineParser<'a>) : LineParser<'a> = 
-        LineParser <| fun st -> 
-            match apply1 ma st with
+        LineParser <| fun opts body st -> 
+            match apply1 ma opts body st with
             | Error msg -> Error msg
-            | Ok (a, st1) -> apply1 mb st1
+            | Ok (a, st1) -> apply1 mb opts body st1
 
 
     let inline private  delayM (fn:unit -> LineParser<'a>) : LineParser<'a> = 
@@ -74,7 +75,7 @@ module Parser =
     let (lineParser:LineParserBuilder) = new LineParserBuilder ()
 
 
-    let (>>=) (ma:LineParser<'a>) (fn:'a -> LineParser<'b>) : LineParser<'b> = 
+    let ( >>= ) (ma:LineParser<'a>) (fn:'a -> LineParser<'b>) : LineParser<'b> = 
         bindM ma fn
 
 
@@ -82,39 +83,51 @@ module Parser =
     // Errors
 
     let parseError (msg:string) : LineParser<'a> = 
-        LineParser <| fun _  -> Error msg
+        LineParser <| fun _ _ _ -> Error msg
 
     let swapError (msg:string) (parser:LineParser<'a>) : LineParser<'a> = 
-        LineParser <| fun st ->
-            match apply1 parser st with
+        LineParser <| fun opts body st ->
+            match apply1 parser opts body st with
             | Error _ -> Error msg
             | Ok (pos1,a) -> Ok (pos1,a)
 
-    let (<?>) (parser:LineParser<'a>) (msg:string) : LineParser<'a> = 
+    let ( <?> ) (parser:LineParser<'a>) (msg:string) : LineParser<'a> = 
         swapError msg parser
 
 
 
     // Common monadic operations
-    let fmapM (fn:'a -> 'b) (ma:LineParser<'a>) : LineParser<'b> = 
-        LineParser <| fun st -> 
-           match apply1 ma st with
+    let fmapM (fn:'a -> 'b) (parser:LineParser<'a>) : LineParser<'b> = 
+        LineParser <| fun opts body st -> 
+           match apply1 parser opts body st with
            | Error msg -> Error msg
            | Ok (a, st1) -> Ok (fn a, st1)
 
 
 
     /// Operator for fmap.
-    let (|>>) (ma:LineParser<'a>) (fn:'a -> 'b) : LineParser<'b> = 
-        fmapM fn ma
+    let ( |>> ) (parser:LineParser<'a>) (fn:'a -> 'b) : LineParser<'b> = 
+        fmapM fn parser
 
     /// Flipped fmap.
-    let (<<|) (fn:'a -> 'b) (ma:LineParser<'a>) : LineParser<'b> = 
-        fmapM fn ma
+    let ( <<| ) (fn:'a -> 'b) (parser:LineParser<'a>) : LineParser<'b> = 
+        fmapM fn parser
 
     let ignoreM (parser:LineParser<'a>) : LineParser<unit> = 
         parser |>> ignore
 
+    // ****************************************************
+    // Monadic operations
+
+    let getRegexOptions () : LineParser<RegexOptions> = 
+        LineParser <| fun opts _ st -> Ok (opts, st)
+
+    let localOptions (modify : RegexOptions -> RegexOptions) (ma: LineParser<'a>) : LineParser<'a> = 
+        LineParser <| fun opts body st -> 
+            apply1 ma (modify opts) body st
+
+    let ignoreCase (ma : LineParser<'a>) : LineParser<'a> = 
+        localOptions (fun opts -> RegexOptions.IgnoreCase ||| opts) ma
 
     // liftM (which is fmap)
     let liftM (fn:'a -> 'x) (ma:LineParser<'a>) : LineParser<'x> = 
@@ -226,15 +239,15 @@ module Parser =
 
     /// Left biased choice, if ``ma`` succeeds return its result, otherwise try ``mb``.
     let alt (ma:LineParser<'a>) (mb:LineParser<'a>) : LineParser<'a> = 
-        LineParser <| fun st ->
-            match apply1 ma st with
+        LineParser <| fun opts body st ->
+            match apply1 ma opts body st with
             | Error err1 -> 
-                match apply1 mb st with
+                match apply1 mb opts body st with
                 | Error err2 -> Error (sprintf "alt (%s, %s)" err1 err2)
                 | Ok (b, st1) -> Ok (b, st1)
             | Ok (a, st1) -> Ok (a, st1)
 
-    let (<|>) (ma:LineParser<'a>) (mb:LineParser<'a>) : LineParser<'a> = 
+    let ( <|> ) (ma:LineParser<'a>) (mb:LineParser<'a>) : LineParser<'a> = 
         alt ma mb <?> "(<|>)"
 
 
@@ -246,10 +259,10 @@ module Parser =
             return (fn a) 
         }
 
-    let (<*>) (ma:LineParser<'a -> 'b>) (mb:LineParser<'a>) : LineParser<'b> = 
+    let ( <*> ) (ma:LineParser<'a -> 'b>) (mb:LineParser<'a>) : LineParser<'b> = 
         apM ma mb
 
-    let (<&>) (ma:LineParser<'a>) (fn:'a -> 'b)  :LineParser<'b> = 
+    let ( <&> ) (ma:LineParser<'a>) (fn:'a -> 'b)  :LineParser<'b> = 
         fmapM fn ma
 
 
@@ -269,56 +282,58 @@ module Parser =
             return b
         }
 
-    let (.>>) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'a> = 
+    let ( .>> ) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'a> = 
         seqL ma mb
 
-    let (>>.) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> = 
+    let ( >>. ) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> = 
         seqR ma mb
 
     /// In CPS
     let mapM (p: 'a -> LineParser<'b>) (source:'a list) : LineParser<'b list> = 
-        LineParser <| fun state0 -> 
+        LineParser <| fun opts body state0 -> 
             let rec work ys st fk sk = 
                 match ys with
                 | [] -> sk ([],st)
                 | z :: zs -> 
-                    match apply1 (p z) st with
+                    match apply1 (p z) opts body st with
                     | Error msg -> fk msg
                     | Ok (a, st1) -> work zs st1 fk (fun (acc,st2) -> sk (a::acc, st2))
             work source state0 (fun msg -> Error msg) (fun x -> Ok x)
 
-    let forM (source:'a list) (parser: 'a -> LineParser<'b>) : LineParser<'b list> = 
+    let forM (source :'a list) (parser : 'a -> LineParser<'b>) : LineParser<'b list> = 
         mapM parser source
 
-    let option (defaultValue:'a) (parser: LineParser<'a>) : LineParser<'a> = 
+    let option (defaultValue : 'a) (parser : LineParser<'a>) : LineParser<'a> = 
         parser <|> mreturn defaultValue
 
     /// Optionally parses. When the parser fails return None and don't move the cursor position.
-    let optionMaybe (ma:LineParser<'a>) : LineParser<'a option> = 
-        LineParser <| fun st ->
-            match apply1 ma st with
+    let optionMaybe (parser : LineParser<'a>) : LineParser<'a option> = 
+        LineParser <| fun opts body st ->
+            match apply1 parser opts body st with
             | Error _ -> Ok (None, st)
             | Ok (a, st1) -> Ok (Some a, st1)
 
-    let optional (ma:LineParser<'a>) : LineParser<unit> = 
-        LineParser <| fun st ->
-            match apply1 ma st with
+    let optional (parser : LineParser<'a>) : LineParser<unit> = 
+        LineParser <| fun opts body st ->
+            match apply1 parser opts body st with
             | Error _ -> Ok ((), st)
             | Ok (_, st1) -> Ok ((), st1)
 
     // *************************************
     // Run functions
 
-    /// TODO - want a safer string split...
+    /// Caution is the split good enough?
     let runLineParser (input:string) (ma:LineParser<'a>) : Answer<'a>= 
+        let opts = RegexOptions.None
         let lines = input.Split(separator = [| "\r\n" ; "\r" ; "\n" |], options = StringSplitOptions.None)
         match ma with 
-        | LineParser fn ->  fn { LineNumber = 0 ; Lines = Array.toList lines }
+        | LineParser fn ->  fn opts lines 0
 
     let runLineParserFile (inputPath:string) (ma:LineParser<'a>) : Answer<'a>= 
-        let lines : string list = System.IO.File.ReadAllLines(inputPath) |> Array.toList
+        let opts = RegexOptions.None
+        let lines : string [] = System.IO.File.ReadAllLines(inputPath)
         match ma with 
-        | LineParser fn ->  fn { LineNumber = 0 ; Lines = lines }
+        | LineParser fn ->  fn opts lines 0
 
 
 
@@ -326,10 +341,12 @@ module Parser =
     // Single line parsers
 
     let line : LineParser<string> = 
-        LineParser <| fun st ->
-            match st.Lines with
-            | [] -> Error "line - out of input"
-            | x :: xs -> Ok (x, { LineNumber = st.LineNumber + 1; Lines = xs })
+        LineParser <| fun _ body st ->
+            try 
+                let ans = body.[st] in Ok (ans, st+1)
+            with
+            | _ -> Error "line - out of input"
+            
 
 
     let skipline : LineParser<unit> = 
@@ -359,21 +376,19 @@ module Parser =
     // *************************************
     // Parser combinators
 
-    // We don't care that these textual names clash with FParsec.
-    // The (textual) names for common parser combinators are so canonical that 
-    // changing them would hamper readabilty. Textual names can be used qualified.
+
 
     /// End of document?
     let eof : LineParser<unit> =
-        LineParser <| fun st ->
-            if st.Lines.IsEmpty then Ok ((), st) else Error "eof - not at end"
+        LineParser <| fun _ body st ->
+            if st >= body.Length then Ok ((), st) else Error "eof - not at end"
 
-///// Parses p without consuming input
-//let lookahead (ma:LineParser<'a>) : LineParser<'a> =
-//    LineParser <| fun lines pos ->
-//        match apply1 ma lines pos with
-//        | Error msg -> Error msg
-//        | Ok (_,a) -> Ok (pos,a)
+    /// Parses p without consuming input
+    let lookahead (parser:LineParser<'a>) : LineParser<'a> =
+        LineParser <| fun opts body st ->
+            match apply1 parser opts body st with
+            | Error msg -> Error msg
+            | Ok (a, _) -> Ok (a, st)
 
 
     let between (popen:LineParser<_>) (pclose:LineParser<_>) 
@@ -387,9 +402,9 @@ module Parser =
 
 
     let many (parser:LineParser<'a>) : LineParser<'a list> = 
-        LineParser <| fun state0 ->
+        LineParser <| fun opts body state0 ->
             let rec work st cont = 
-                match apply1 parser st with
+                match apply1 parser opts body st with
                 | Error _ -> cont ([], st)
                 | Ok (a, st1) -> work st1 (fun (ac,st2) -> cont (a::ac, st2))
             work state0 (fun x -> Ok x)
@@ -403,9 +418,9 @@ module Parser =
         } 
 
     let skipMany (parser:LineParser<'a>) : LineParser<unit> = 
-        LineParser <| fun state0 ->
+        LineParser <| fun opts body state0 ->
             let rec work st cont = 
-                match apply1 parser st with
+                match apply1 parser opts body st with
                 | Error _ -> cont st
                 | Ok (_, st1) -> work st1 cont
             work state0 (fun st -> Ok ((), st))
@@ -473,11 +488,11 @@ module Parser =
 
     let manyTill (parser:LineParser<'a>) 
                     (terminator:LineParser<_>) : LineParser<'a list> = 
-        LineParser <| fun state0 ->
+        LineParser <| fun opts body state0 ->
             let rec work st fk sk = 
-                match apply1 terminator st with
+                match apply1 terminator opts body st with
                 | Error msg -> 
-                    match apply1 parser st with
+                    match apply1 parser opts body st with
                     | Error msg -> fk msg
                     | Ok (a, st1) -> work st1 fk (fun (ac, st2) -> sk (a::ac, st2))
                 | Ok (_, st2) -> sk ([], st2)
@@ -493,11 +508,11 @@ module Parser =
 
 
     let skipManyTill (parser:LineParser<'a>) (terminator:LineParser<_>) : LineParser<unit> = 
-        LineParser <| fun state0 ->
+        LineParser <| fun opts body state0 ->
             let rec work st fk sk = 
-                match apply1 terminator st with
+                match apply1 terminator opts body st with
                 | Error _ -> 
-                    match apply1 parser st with
+                    match apply1 parser opts body st with
                     | Error msg -> fk (sprintf "skipManyTill (%s)" msg)
                     | Ok (_, st1) -> work st1 fk sk
                 | Ok (_, st1) -> sk st1
@@ -505,3 +520,41 @@ module Parser =
 
     let skipMany1Till (ma:LineParser<'a>) (terminator:LineParser<_>) : LineParser<unit> = 
         ma >>. (skipManyTill ma terminator)    
+
+
+
+    // ****************************************************
+    // Regex matching
+
+    /// Current line 
+    let isMatch (pattern:string) : LineParser<bool> = 
+        lineParser { 
+            let! input = line 
+            let! regexOpts =  getRegexOptions ()
+            return Regex.IsMatch( input = input
+                                , pattern = pattern
+                                , options = regexOpts )
+        }
+
+    /// Current line 
+    let isNotMatch (pattern:string) : LineParser<bool> = 
+        isMatch pattern |>> not
+
+
+    /// Current line 
+    let regexMatch (pattern:string) : LineParser<RegularExpressions.Match> =
+        lineParser { 
+            let! input = line 
+            let! regexOpts =  getRegexOptions ()
+            return Regex.Match( input = input
+                            , pattern = pattern
+                            , options = regexOpts )
+        }
+
+    /// Current line 
+    let matchValue (pattern:string) : LineParser<string> =
+        regexMatch pattern >>= fun matchObj -> 
+        if matchObj.Success then
+            mreturn matchObj.Value
+        else
+            parseError "no match"
