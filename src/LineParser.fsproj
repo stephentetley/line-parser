@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="LineParser\Parser.fs" />
+    <Compile Include="LineParser\Regex.fs" />
   </ItemGroup>
 
 </Project>
