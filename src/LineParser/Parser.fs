@@ -68,6 +68,7 @@ module Parser =
         member self.Zero ()             = zeroM ()
         member self.Combine (ma,mb)     = combineM ma mb
         member self.Delay fn            = delayM fn
+        member self.ReturnFrom ma       = ma
 
 
     // Prefer "parse" to "parser" for the _Builder instance
@@ -94,7 +95,15 @@ module Parser =
     let ( <?> ) (parser:LineParser<'a>) (msg:string) : LineParser<'a> = 
         swapError msg parser
 
-
+    /// Lift an operation that may fail (e.g. an 'IO' operation).
+    /// If the action does fail, replace the hard error with 
+    /// a (soft) error within the monad.
+    let liftOperation (errMsg:string) (operation: unit -> 'a) : LineParser<'a> = 
+        try 
+            let ans = operation ()
+            mreturn ans
+        with
+        | _ -> parseError errMsg
 
     // Common monadic operations
     let fmapM (fn:'a -> 'b) (parser:LineParser<'a>) : LineParser<'b> = 
@@ -288,6 +297,36 @@ module Parser =
     let ( >>. ) (ma:LineParser<'a>) (mb:LineParser<'b>) : LineParser<'b> = 
         seqR ma mb
 
+    // ****************************************************
+    // List processing
+
+    /// This interprets failure as failure.
+    let allM (predicates: LineParser<bool> list) : LineParser<bool> =
+        LineParser <| fun opts body state0 -> 
+            let rec work ys st cont = 
+                match ys with
+                | [] -> cont (Ok (true, st))
+                | test :: rest -> 
+                    match apply1 test opts body st with
+                    | Error msg -> cont (Error msg)    // short circuit
+                    | Ok (false, st1) -> cont (Ok (false, st1))    // short circuit
+                    | Ok (true, st1) -> work rest st1 cont
+            work predicates state0 (fun ans -> ans)
+
+    /// This interprets failure as failure.
+    let anyM (predicates: LineParser<bool> list) : LineParser<bool> =
+        LineParser <| fun opts body state0 -> 
+            let rec work ys st cont = 
+                match ys with
+                | [] -> cont (Ok (false, st))
+                | test :: rest -> 
+                    match apply1 test opts body st with
+                    | Error msg -> cont (Error msg) 
+                    | Ok (false, st1) -> work rest st1 cont
+                    | Ok (true, st1)-> cont (Ok (true, st1))
+            work predicates state0 (fun ans -> ans)
+
+
     /// In CPS
     let mapM (p: 'a -> LineParser<'b>) (source:'a list) : LineParser<'b list> = 
         LineParser <| fun opts body state0 -> 
@@ -318,6 +357,28 @@ module Parser =
             match apply1 parser opts body st with
             | Error _ -> Ok ((), st)
             | Ok (_, st1) -> Ok ((), st1)
+
+
+
+    let andM (ma:LineParser<bool>) (mb:LineParser<bool>) :LineParser<bool> =
+        pipeM2 ma mb (&&)
+
+
+    let ( <&&> ) (ma:LineParser<bool>) (mb:LineParser<bool>) : LineParser<bool> =
+        andM ma mb
+
+
+    let orM (ma:LineParser<bool>)
+            (mb:LineParser<bool>) : LineParser<bool> =
+        ma >>= fun ans -> 
+        if ans then 
+            mreturn true 
+        else 
+            mb >>= fun ans2 -> mreturn ans2
+
+    let ( <||> ) (ma:LineParser<bool>)
+                 (mb:LineParser<bool>) : LineParser<bool> =
+        orM ma mb
 
     // *************************************
     // Run functions
@@ -352,25 +413,7 @@ module Parser =
     let skipline : LineParser<unit> = 
         ignoreM line
 
-
-//let rmatch1 (pattern:string) : LineParser<string> = 
-//    let action = 
-//        textline >>= fun input -> 
-//        match Regex.Matches(input, pattern) |> Seq.cast<Match> |> Seq.toList with
-//        | (m1::_) -> mreturn m1.Value
-//        | _ -> throwError "rmatch1 - no match"
-//    action <&?> "rmatch1"
-
-//let rgroups (pattern:string) : LineParser<GroupCollection>= 
-//    let parse1 = 
-//        textline >>= fun input -> 
-//        let m1 = Regex.Match(input, pattern) 
-//        if m1.Success then
-//            mreturn m1.Groups
-//        else
-//            throwError "groups - no match"
-//    parse1 <&?> "rgroups"
-
+    
 
 
     // *************************************
@@ -558,3 +601,78 @@ module Parser =
             mreturn matchObj.Value
         else
             parseError "no match"
+
+    let matchGroups (pattern:string) : LineParser<RegularExpressions.GroupCollection> =
+        regexMatch pattern >>= fun matchObj -> 
+        if matchObj.Success then
+            mreturn matchObj.Groups
+        else
+            parseError "no match"
+
+    let private isNumber (str:string) : bool = 
+        let pattern = "^\d+$"
+        Regex.IsMatch(input = str, pattern = pattern)
+    
+    /// This only returns user named matches, not the 'internal' ones given 
+    /// numeric names by .Net's regex library.
+    let matchNamedMatches (pattern:string) : LineParser<Map<string, string>> =
+        regexMatch pattern >>= fun matchObj -> 
+        if matchObj.Success then
+            let nameValues = matchObj.Groups |> Seq.cast<Group> 
+            let matches = 
+                Seq.fold (fun acc (grp:Group) -> 
+                            if isNumber grp.Name then acc else Map.add grp.Name grp.Value acc)
+                        Map.empty
+                        nameValues
+            mreturn matches
+        else
+            parseError "no match"
+
+    let anyMatch (patterns:string []) : LineParser<bool> = 
+        let (predicates : LineParser<bool> list) = 
+            patterns |> Array.toList |> List.map isMatch
+        anyM predicates
+
+
+    let allMatch (patterns:string []) : LineParser<bool> = 
+        let (predicates : LineParser<bool> list) = 
+            patterns |> Array.toList |> List.map isMatch
+        allM predicates
+
+    let matchStart (pattern:string) : LineParser<int> =
+        regexMatch pattern >>= fun matchObj -> 
+        if matchObj.Success then
+            mreturn matchObj.Index
+        else
+           parseError "no match"
+
+
+    let matchEnd (pattern:string) : LineParser<int> =
+        regexMatch pattern >>= fun matchObj -> 
+        if matchObj.Success then
+            let start = matchObj.Index
+            mreturn (start + matchObj.Length)
+        else
+            parseError "no match"
+
+    let private contentsFrom (startIndex: int) : LineParser<string> = 
+        lineParser { 
+            let! str = line
+            return! liftOperation "contentsFrm" (fun _ ->  str.Substring(startIndex= startIndex))
+        }
+
+    let private contentsTo (endIndex: int) : LineParser<string> = 
+        lineParser { 
+            let! str = line
+            return! liftOperation "contentTo" (fun _ -> str.Substring(startIndex = 0, length = endIndex))
+        }
+
+
+    let leftOfMatch (pattern:string) : LineParser<string> =
+        matchStart pattern >>= fun ix -> 
+        contentsTo ix
+        
+
+    let rightOfMatch (pattern:string) : LineParser<string> =
+        matchEnd pattern >>= fun ix -> 
+        contentsFrom ix
